@@ -2,6 +2,7 @@ import serial
 import time
 import pygame
 import os
+import random
 
 # ---- Serial setup ----
 PORT = "/dev/cu.usbserial-59270097101"  # replace with your ESP32 port
@@ -15,29 +16,41 @@ except serial.SerialException:
 
 # ---- Audio setup ----
 pygame.mixer.init()
-pygame.mixer.set_num_channels(16)  # enough channels for 7 sounds
+pygame.mixer.set_num_channels(16)
 
-# Map TTGO GPIOs to audio files
-audio_files = {
-    2: "01-BDE_Monster_01.wav",   # TOUCH2
-    15: "01-E_Monster_01.wav",    # TOUCH3
-    13: "01-BE_Monster_01.wav",   # TOUCH4
-    12: "01-BD_Monster_01.wav",   # TOUCH5
-    32: "01-BD_Monster_01.wav",   # TOUCH9
-    33: "01-G_Monster_01.wav",    # TOUCH8
-    27: "01-Z01_Monster_01.wav",  # TOUCH7
+# Default audio files per pin
+default_audio_files = {
+    2: "01-BDE_Monster_01.wav",
+    15: "01-E_Monster_01.wav",
+    13: "01-BE_Monster_01.wav",
+    12: "01-BD_Monster_01.wav",
+    32: "01-BD_Monster_01.wav",
+    33: "01-G_Monster_01.wav",
+    27: "01-Z01_Monster_01.wav",
 }
 
-# Load sound objects and track states
-sounds = {}
-touch_states = {}
-for pin, filename in audio_files.items():
-    path = os.path.join(os.path.dirname(__file__), "audio", filename)
+# ---- Gather all audio files in /audio ----
+all_audio_files = [f for f in os.listdir("audio") if f.endswith(".wav")]
+
+# Map pin to currently assigned sound
+assigned_audio_files = default_audio_files.copy()
+assigned_sounds = {}
+for pin, fname in assigned_audio_files.items():
+    path = os.path.join("audio", fname)
     if not os.path.exists(path):
         print(f"Audio file missing: {path}")
         exit(1)
-    sounds[pin] = pygame.mixer.Sound(path)
-    touch_states[pin] = False  # initially not touched
+    assigned_sounds[pin] = pygame.mixer.Sound(path)
+
+# Touch tracking
+touch_states = {pin: False for pin in assigned_audio_files.keys()}
+touch_start_time = {pin: 0 for pin in assigned_audio_files.keys()}
+last_tap_time = {pin: 0 for pin in assigned_audio_files.keys()}
+
+# Timing constants
+DOUBLE_TAP_MAX_INTERVAL = 0.5  # max seconds between taps to count as double tap
+DOUBLE_TAP_MIN_INTERVAL = 0.05 # minimum interval to avoid accidental double taps
+TAP_MAX_DURATION = 0.25         # max duration of a touch to count as tap
 
 print("Listening for ESP32 touch data...")
 
@@ -52,17 +65,35 @@ while True:
             pin = int(pin_str)
             state = int(state_str)
         except ValueError:
-            continue  # ignore malformed lines
+            continue
 
-        # Only act if state has changed
+        current_time = time.time()
+
         if state == 1 and not touch_states.get(pin, False):
+            # Touch started
             touch_states[pin] = True
-            sounds[pin].play(-1)  # loop while pressed
-            print(f"Pin {pin} pressed — audio started")
+            touch_start_time[pin] = current_time
+            assigned_sounds[pin].play(-1)  # loop while holding
+            print(f"Pin {pin} pressed — playing assigned audio: {assigned_audio_files[pin]}")
 
         elif state == 0 and touch_states.get(pin, False):
+            # Touch released
             touch_states[pin] = False
-            sounds[pin].stop()
-            print(f"Pin {pin} released — audio stopped")
+            touch_duration = current_time - touch_start_time[pin]
+            assigned_sounds[pin].stop()
+            print(f"Pin {pin} released — stopped audio: {assigned_audio_files[pin]}")
+
+            # Check for double tap (short touch)
+            if touch_duration <= TAP_MAX_DURATION:
+                interval_since_last_tap = current_time - last_tap_time[pin]
+                if DOUBLE_TAP_MIN_INTERVAL < interval_since_last_tap <= DOUBLE_TAP_MAX_INTERVAL:
+                    # Double tap detected → reassign a random audio file
+                    available_files = [f for f in all_audio_files if f != assigned_audio_files[pin]]
+                    if available_files:
+                        new_file = random.choice(available_files)
+                        assigned_audio_files[pin] = new_file
+                        assigned_sounds[pin] = pygame.mixer.Sound(os.path.join("audio", new_file))
+                        print(f"Pin {pin} double tapped — reassigned to random audio: {new_file}")
+                last_tap_time[pin] = current_time
 
     time.sleep(0.01)
